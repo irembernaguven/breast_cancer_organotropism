@@ -557,27 +557,75 @@ with tab_network:
                 if abs(val) >= edge_threshold:
                     G.add_edge(gene_a, gene_b, weight=val)
                     
-        # Draw NetworkX graph
-        fig_net, ax_net = plt.subplots(figsize=(8, 8))
-        pos = nx.spring_layout(G, k=0.6, seed=42)
+        # Draw Network Graph
+        st.markdown("### 🕸️ Interactive Association Network")
+        st.markdown("""
+        *   **Drag & Drop:** Click and drag genes to untangle the network.
+        *   **Hover:** Hover over a gene to see mutation counts, or hover over an edge to see the correlation value.
+        *   **Zoom:** Use your scroll wheel to zoom in and out.
+        """)
         
+        from pyvis.network import Network
+        import streamlit.components.v1 as components
+        
+        # Create pyvis network
+        net = Network(height="500px", width="100%", bgcolor="#ffffff", font_color="#2c3e50")
+        net.toggle_physics(True)
+        
+        # Add nodes
+        for gene in top_net_genes:
+            mut_count = int(net_matrix[gene].sum())
+            node_size = 15 + (mut_count / len(net_matrix)) * 100
+            net.add_node(
+                gene, 
+                label=gene, 
+                size=node_size, 
+                title=f"Gene: {gene}\nMutations: {mut_count} patients ({(mut_count/len(net_matrix))*100:.1f}%)",
+                color='#34495e'
+            )
+            
+        # Add edges
         edges = G.edges()
-        if len(edges) > 0:
-            weights = [G[u][v]['weight'] for u,v in edges]
-            edge_colors = ['#2ecc71' if w > 0 else '#e74c3c' for w in weights]
-            edge_widths = [abs(w) * 15 for w in weights]
+        for u, v, data in G.edges(data=True):
+            weight = data['weight']
+            edge_color = '#2ecc71' if weight > 0 else '#e74c3c'
+            edge_width = abs(weight) * 20
+            net.add_edge(
+                u, v, 
+                value=edge_width, 
+                color=edge_color, 
+                title=f"Correlation (r): {weight:.3f}"
+            )
             
-            nx.draw_networkx_nodes(G, pos, node_size=1000, node_color='#34495e', ax=ax_net)
-            nx.draw_networkx_labels(G, pos, font_color='white', font_size=9, font_weight='bold', ax=ax_net)
-            nx.draw_networkx_edges(G, pos, edgelist=edges, width=edge_widths, edge_color=edge_colors, ax=ax_net)
-        else:
-            nx.draw_networkx_nodes(G, pos, node_size=1000, node_color='#34495e', ax=ax_net)
-            nx.draw_networkx_labels(G, pos, font_color='white', font_size=9, font_weight='bold', ax=ax_net)
-            st.info("No connections found at this threshold. Try lowering the threshold.")
+        # Save and render
+        try:
+            graph_html_path = "pyvis_graph.html"
+            net.save_graph(graph_html_path)
+            with open(graph_html_path, 'r', encoding='utf-8') as f:
+                html_source = f.read()
+            components.html(html_source, height=550)
+        except Exception as e:
+            st.error(f"Error rendering interactive network: {e}")
             
-        ax_net.axis('off')
-        st.pyplot(fig_net)
         st.markdown("**Legend:** Green edges indicate **positive co-occurrence** (mutating together). Red edges indicate **negative correlation / mutual exclusivity**.")
+
+        # Show old static matplotlib graph as an optional fallback
+        show_static_layout = st.checkbox("Show Static Matplotlib Layout Graph")
+        if show_static_layout:
+            fig_net, ax_net = plt.subplots(figsize=(8, 8))
+            pos = nx.spring_layout(G, k=0.6, seed=42)
+            if len(edges) > 0:
+                weights = [G[u][v]['weight'] for u,v in edges]
+                edge_colors = ['#2ecc71' if w > 0 else '#e74c3c' for w in weights]
+                edge_widths = [abs(w) * 15 for w in weights]
+                nx.draw_networkx_nodes(G, pos, node_size=1000, node_color='#34495e', ax=ax_net)
+                nx.draw_networkx_labels(G, pos, font_color='white', font_size=9, font_weight='bold', ax=ax_net)
+                nx.draw_networkx_edges(G, pos, edgelist=edges, width=edge_widths, edge_color=edge_colors, ax=ax_net)
+            else:
+                nx.draw_networkx_nodes(G, pos, node_size=1000, node_color='#34495e', ax=ax_net)
+                nx.draw_networkx_labels(G, pos, font_color='white', font_size=9, font_weight='bold', ax=ax_net)
+            ax_net.axis('off')
+            st.pyplot(fig_net)
 
     st.markdown("---")
     
