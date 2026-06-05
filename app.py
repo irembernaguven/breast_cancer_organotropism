@@ -9,6 +9,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_curve, auc, accuracy_score, precision_score, recall_score, f1_score
+from xgboost import XGBClassifier
 import networkx as nx
 
 # ---------------------------------------------------------
@@ -405,7 +406,7 @@ with tab_ml:
     """)
     
     # Selection of classifier
-    classifier_name = st.selectbox("Select Machine Learning Model:", ["Random Forest", "Logistic Regression"])
+    classifier_name = st.selectbox("Select Machine Learning Model:", ["Random Forest", "XGBoost", "Logistic Regression"])
     
     # Prepare data for Machine Learning
     # Find the top 20 mutated genes across the entire study
@@ -433,6 +434,18 @@ with tab_ml:
         # Train model
         if classifier_name == "Random Forest":
             model = RandomForestClassifier(n_estimators=100, max_depth=5, min_samples_leaf=5, class_weight='balanced', random_state=42)
+        elif classifier_name == "XGBoost":
+            neg_count = (y_train == 0).sum()
+            pos_count = (y_train == 1).sum()
+            scale_pos = neg_count / pos_count if pos_count > 0 else 1.0
+            model = XGBClassifier(
+                n_estimators=100,
+                max_depth=4,
+                learning_rate=0.05,
+                scale_pos_weight=scale_pos,
+                random_state=42,
+                eval_metric='logloss'
+            )
         else:
             model = LogisticRegression(max_iter=1000, class_weight='balanced', random_state=42)
             
@@ -485,6 +498,10 @@ with tab_ml:
                 importances = pd.Series(model.feature_importances_, index=feature_cols).sort_values(ascending=True).tail(10)
                 importances.plot(kind='barh', color='#e74c3c', ax=ax_imp)
                 ax_imp.set_xlabel('Feature Importance')
+            elif classifier_name == "XGBoost":
+                importances = pd.Series(model.feature_importances_, index=feature_cols).sort_values(ascending=True).tail(10)
+                importances.plot(kind='barh', color='#2ecc71', ax=ax_imp)
+                ax_imp.set_xlabel('Feature Importance')
             else:
                 coefs = pd.Series(model.coef_[0], index=feature_cols).sort_values(ascending=True)
                 # Keep top 10 strongest features (absolute weight)
@@ -496,16 +513,6 @@ with tab_ml:
     else:
         st.warning("Insufficient samples or positive metastasis classes to perform Machine Learning training.")
         
-    st.markdown("---")
-    
-    # Option to view static pre-calculated figure
-    show_static_ml = st.checkbox("Show Static Multi-omics Feature Importance Figure (Previously Generated)")
-    if show_static_ml:
-        static_img_path = "/Users/irembernaguven/Downloads/cancer project/multiomics_feature_importance.png"
-        if os.path.exists(static_img_path):
-            st.image(static_img_path, caption="Pre-calculated Multi-omics Feature Importance Heatmap / Chart", use_container_width=True)
-        else:
-            st.error("Static image 'multiomics_feature_importance.png' was not found in the project folder.")
 
 # =========================================================
 # TAB 7: NETWORK & CO-OCCURRENCE ANALYSIS
@@ -529,114 +536,125 @@ with tab_network:
     # Calculate Pearson Correlation
     corr_matrix = net_matrix.corr()
     
-    net_c1, net_c2 = st.columns(2)
+    # Plotting Heatmap and Network sequentially (alt alta)
+    st.subheader("🔥 Mutation Co-occurrence Correlation Heatmap")
+    st.markdown("""
+    This heatmap displays the Pearson correlation ($r$) of mutational co-occurrence. 
+    *   **Positive values (Red)** represent **co-occurrence** (mutations appearing together, indicating synergistic pathways).
+    *   **Negative values (Blue)** represent **mutual exclusivity** (mutations rarely appearing together, indicating redundant pathway functionality).
+    *   Readings/numbers on the grid display the exact correlation coefficient ($r$).
+    """)
     
-    with net_c1:
-        st.subheader("🔥 Mutation Co-occurrence Correlation Heatmap")
-        fig_heat, ax_heat = plt.subplots(figsize=(8, 7))
-        sns.heatmap(corr_matrix, annot=False, cmap='coolwarm', vmin=-1.0, vmax=1.0, square=True, cbar=True, ax=ax_heat)
-        st.pyplot(fig_heat)
-        
-    with net_c2:
-        st.subheader("🕸️ Dynamic Interaction Network")
-        st.markdown("Specify the correlation threshold to draw edges in the network graph:")
-        
-        # Edge correlation threshold slider
-        edge_threshold = st.slider("Correlation Threshold (Absolute value):", min_value=0.01, max_value=0.30, value=0.05, step=0.01)
-        
-        # Build NetworkX graph
-        G = nx.Graph()
-        for gene in top_net_genes:
-            G.add_node(gene)
-            
-        for i in range(len(top_net_genes)):
-            for j in range(i+1, len(top_net_genes)):
-                gene_a = top_net_genes[i]
-                gene_b = top_net_genes[j]
-                val = corr_matrix.loc[gene_a, gene_b]
-                if abs(val) >= edge_threshold:
-                    G.add_edge(gene_a, gene_b, weight=val)
-                    
-        # Draw Network Graph
-        st.markdown("### 🕸️ Interactive Association Network")
-        st.markdown("""
-        *   **Drag & Drop:** Click and drag genes to untangle the network.
-        *   **Hover:** Hover over a gene to see mutation counts, or hover over an edge to see the correlation value.
-        *   **Zoom:** Use your scroll wheel to zoom in and out.
-        """)
-        
-        from pyvis.network import Network
-        import streamlit.components.v1 as components
-        
-        # Create pyvis network
-        net = Network(height="500px", width="100%", bgcolor="#ffffff", font_color="#2c3e50")
-        net.toggle_physics(True)
-        
-        # Add nodes
-        for gene in top_net_genes:
-            mut_count = int(net_matrix[gene].sum())
-            node_size = 15 + (mut_count / len(net_matrix)) * 100
-            net.add_node(
-                gene, 
-                label=gene, 
-                size=node_size, 
-                title=f"Gene: {gene}\nMutations: {mut_count} patients ({(mut_count/len(net_matrix))*100:.1f}%)",
-                color='#34495e'
-            )
-            
-        # Add edges
-        edges = G.edges()
-        for u, v, data in G.edges(data=True):
-            weight = data['weight']
-            edge_color = '#2ecc71' if weight > 0 else '#e74c3c'
-            edge_width = abs(weight) * 20
-            net.add_edge(
-                u, v, 
-                value=edge_width, 
-                color=edge_color, 
-                title=f"Correlation (r): {weight:.3f}"
-            )
-            
-        # Save and render
-        try:
-            graph_html_path = "pyvis_graph.html"
-            net.save_graph(graph_html_path)
-            with open(graph_html_path, 'r', encoding='utf-8') as f:
-                html_source = f.read()
-            components.html(html_source, height=550)
-        except Exception as e:
-            st.error(f"Error rendering interactive network: {e}")
-            
-        st.markdown("**Legend:** Green edges indicate **positive co-occurrence** (mutating together). Red edges indicate **negative correlation / mutual exclusivity**.")
-
-        # Show old static matplotlib graph as an optional fallback
-        show_static_layout = st.checkbox("Show Static Matplotlib Layout Graph")
-        if show_static_layout:
-            fig_net, ax_net = plt.subplots(figsize=(8, 8))
-            pos = nx.spring_layout(G, k=0.6, seed=42)
-            if len(edges) > 0:
-                weights = [G[u][v]['weight'] for u,v in edges]
-                edge_colors = ['#2ecc71' if w > 0 else '#e74c3c' for w in weights]
-                edge_widths = [abs(w) * 15 for w in weights]
-                nx.draw_networkx_nodes(G, pos, node_size=1000, node_color='#34495e', ax=ax_net)
-                nx.draw_networkx_labels(G, pos, font_color='white', font_size=9, font_weight='bold', ax=ax_net)
-                nx.draw_networkx_edges(G, pos, edgelist=edges, width=edge_widths, edge_color=edge_colors, ax=ax_net)
-            else:
-                nx.draw_networkx_nodes(G, pos, node_size=1000, node_color='#34495e', ax=ax_net)
-                nx.draw_networkx_labels(G, pos, font_color='white', font_size=9, font_weight='bold', ax=ax_net)
-            ax_net.axis('off')
-            st.pyplot(fig_net)
-
+    fig_heat, ax_heat = plt.subplots(figsize=(11, 10))
+    sns.heatmap(
+        corr_matrix, 
+        annot=True, 
+        fmt=".2f", 
+        cmap='coolwarm', 
+        vmin=-1.0, 
+        vmax=1.0, 
+        square=True, 
+        cbar=True, 
+        ax=ax_heat, 
+        annot_kws={"size": 9, "weight": "semibold"},
+        linewidths=0.5
+    )
+    ax_heat.set_title("Mutation Co-occurrence Correlation Matrix (Pearson r)", fontsize=13, fontweight='bold', pad=12)
+    plt.xticks(rotation=45, ha='right', fontsize=10, fontweight='bold')
+    plt.yticks(rotation=0, fontsize=10, fontweight='bold')
+    plt.tight_layout()
+    st.pyplot(fig_heat)
+    
     st.markdown("---")
     
-    # Option to view static pre-calculated figure
-    show_static_net = st.checkbox("Show Static Mutation Co-occurrence Heatmap Figure (Previously Generated)")
-    if show_static_net:
-        static_net_path = "/Users/irembernaguven/Downloads/cancer project/mutation_cooccurrence_heatmap.png"
-        if os.path.exists(static_net_path):
-            st.image(static_net_path, caption="Pre-calculated Mutation Co-occurrence Correlation Heatmap", use_container_width=True)
+    st.subheader("🕸️ Dynamic Interaction Network")
+    st.markdown("Specify the correlation threshold to draw edges in the network graph:")
+    
+    # Edge correlation threshold slider
+    edge_threshold = st.slider("Correlation Threshold (Absolute value):", min_value=0.01, max_value=0.30, value=0.05, step=0.01)
+    
+    # Build NetworkX graph
+    G = nx.Graph()
+    for gene in top_net_genes:
+        G.add_node(gene)
+        
+    for i in range(len(top_net_genes)):
+        for j in range(i+1, len(top_net_genes)):
+            gene_a = top_net_genes[i]
+            gene_b = top_net_genes[j]
+            val = corr_matrix.loc[gene_a, gene_b]
+            if abs(val) >= edge_threshold:
+                G.add_edge(gene_a, gene_b, weight=val)
+                
+    # Draw Network Graph
+    st.markdown("### 🕸️ Interactive Association Network")
+    st.markdown("""
+    *   **Drag & Drop:** Click and drag genes to untangle the network.
+    *   **Hover:** Hover over a gene to see mutation counts, or hover over an edge to see the correlation value.
+    *   **Zoom:** Use your scroll wheel to zoom in and out.
+    """)
+    
+    from pyvis.network import Network
+    import streamlit.components.v1 as components
+    
+    # Create pyvis network (600px height for larger display)
+    net = Network(height="600px", width="100%", bgcolor="#ffffff", font_color="#2c3e50")
+    net.toggle_physics(True)
+    
+    # Add nodes
+    for gene in top_net_genes:
+        mut_count = int(net_matrix[gene].sum())
+        node_size = 15 + (mut_count / len(net_matrix)) * 100
+        net.add_node(
+            gene, 
+            label=gene, 
+            size=node_size, 
+            title=f"Gene: {gene}\nMutations: {mut_count} patients ({(mut_count/len(net_matrix))*100:.1f}%)",
+            color='#34495e'
+        )
+        
+    # Add edges
+    edges = G.edges()
+    for u, v, data in G.edges(data=True):
+        weight = data['weight']
+        edge_color = '#2ecc71' if weight > 0 else '#e74c3c'
+        edge_width = abs(weight) * 20
+        net.add_edge(
+            u, v, 
+            value=edge_width, 
+            color=edge_color, 
+            title=f"Correlation (r): {weight:.3f}"
+        )
+        
+    # Save and render
+    try:
+        graph_html_path = "pyvis_graph.html"
+        net.save_graph(graph_html_path)
+        with open(graph_html_path, 'r', encoding='utf-8') as f:
+            html_source = f.read()
+        components.html(html_source, height=650)
+    except Exception as e:
+        st.error(f"Error rendering interactive network: {e}")
+        
+    st.markdown("**Legend:** Green edges indicate **positive co-occurrence** (mutating together). Red edges indicate **negative correlation / mutual exclusivity**.")
+
+    # Show old static matplotlib graph as an optional fallback
+    show_static_layout = st.checkbox("Show Static Matplotlib Layout Graph")
+    if show_static_layout:
+        fig_net, ax_net = plt.subplots(figsize=(8, 8))
+        pos = nx.spring_layout(G, k=0.6, seed=42)
+        if len(edges) > 0:
+            weights = [G[u][v]['weight'] for u,v in edges]
+            edge_colors = ['#2ecc71' if w > 0 else '#e74c3c' for w in weights]
+            edge_widths = [abs(w) * 15 for w in weights]
+            nx.draw_networkx_nodes(G, pos, node_size=1000, node_color='#34495e', ax=ax_net)
+            nx.draw_networkx_labels(G, pos, font_color='white', font_size=9, font_weight='bold', ax=ax_net)
+            nx.draw_networkx_edges(G, pos, edgelist=edges, width=edge_widths, edge_color=edge_colors, ax=ax_net)
         else:
-            st.error("Static image 'mutation_cooccurrence_heatmap.png' was not found in the project folder.")
+            nx.draw_networkx_nodes(G, pos, node_size=1000, node_color='#34495e', ax=ax_net)
+            nx.draw_networkx_labels(G, pos, font_color='white', font_size=9, font_weight='bold', ax=ax_net)
+        ax_net.axis('off')
+        st.pyplot(fig_net)
 
 # ---------------------------------------------------------
 # FOOTER / INSIGHTS
