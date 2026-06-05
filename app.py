@@ -2,7 +2,14 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import numpy as np
+import os
 from scipy.stats import mannwhitneyu, fisher_exact
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_curve, auc, accuracy_score, precision_score, recall_score, f1_score
+import networkx as nx
 
 # ---------------------------------------------------------
 # PAGE CONFIGURATION & PREMIUM STYLING
@@ -105,12 +112,14 @@ st.markdown("---")
 # ---------------------------------------------------------
 # DASHBOARD TABS LAYOUT
 # ---------------------------------------------------------
-tab_demographics, tab_mutations, tab_enrichment, tab_cna, tab_tmb = st.tabs([
+tab_demographics, tab_mutations, tab_enrichment, tab_cna, tab_tmb, tab_ml, tab_network = st.tabs([
     "📊 Cohort Demographics",
     "🧬 Mutation Frequencies",
     "🧪 Genomic Enrichment (Fisher's)",
     "📈 Copy Number Alterations (CNA)",
-    "🔬 Tumor Mutational Burden (TMB)"
+    "🔬 Tumor Mutational Burden (TMB)",
+    "🤖 Machine Learning Classifier",
+    "🕸️ Network & Co-occurrence"
 ])
 
 # =========================================================
@@ -152,7 +161,6 @@ with tab_demographics:
                      palette=['#7f8c8d', '#e74c3c'], multiple='dodge', bins=15, ax=ax_age)
         ax_age.set_xlabel("Patient Current Age")
         ax_age.set_ylabel("Count")
-        # Rename legend labels
         legend = ax_age.get_legend()
         if legend:
             legend.set_title("Cohort")
@@ -181,7 +189,6 @@ with tab_demographics:
 with tab_mutations:
     st.header(f"🧬 Top Mutated Genes")
     
-    # Filter mutation data for target and control cohorts
     target_mutations = mutation_df[mutation_df['Tumor_Sample_Barcode'].isin(target_sample_ids)]
     control_mutations = mutation_df[mutation_df['Tumor_Sample_Barcode'].isin(control_sample_ids)]
     
@@ -270,7 +277,6 @@ with tab_enrichment:
         enrichment_df = run_enrichment(target_sample_ids, control_sample_ids, mutation_df)
         
     if not enrichment_df.empty:
-        # P-value filter slider
         p_threshold = st.slider("Select p-value threshold:", min_value=0.01, max_value=1.00, value=0.05, step=0.01)
         
         # Display significant genes
@@ -325,7 +331,6 @@ with tab_cna:
         target_cna_vals = gene_cna[matched_target].values
         control_cna_vals = gene_cna[matched_control].values
         
-        # Map values to labels
         label_map = {-2: 'Deep Deletion (-2)', -1: 'Shallow Loss (-1)', 0: 'Diploid (0)', 1: 'Gain (1)', 2: 'Amplification (2)'}
         
         # Calculate percentages
@@ -364,7 +369,6 @@ with tab_tmb:
     other_tmb = clinical_df[clinical_df['Target'] == 0]['TMB (nonsynonymous)'].dropna()
     
     if len(target_tmb) > 0 and len(other_tmb) > 0:
-        # Statistical test
         stat, p_value = mannwhitneyu(target_tmb, other_tmb, alternative='two-sided')
         
         fig_tmb, ax_tmb = plt.subplots(figsize=(8, 5))
@@ -376,7 +380,6 @@ with tab_tmb:
         ax_tmb.set_xlabel('')
         ax_tmb.set_ylabel('TMB (Mutations per MB)')
         
-        # Add P-value annotation
         ax_tmb.annotate(f'Mann-Whitney p-value: {p_value:.4f}', 
                      xy=(0.5, 0.90), xycoords='axes fraction', 
                      ha='center', fontsize=10, bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", lw=1))
@@ -390,6 +393,202 @@ with tab_tmb:
             st.info(f"ℹ️ **Result is Not Statistically Significant (p >= 0.05):** The mutational burden (TMB) profiles between {selected_site} metastasis and other cohorts are statistically similar.")
     else:
         st.warning("Not enough TMB data available for this site.")
+
+# =========================================================
+# TAB 6: MACHINE LEARNING CLASSIFIER
+# =========================================================
+with tab_ml:
+    st.header("🤖 Machine Learning Classifier")
+    st.markdown(f"""
+    Predict the probability of a patient developing metastasis in the **{selected_site}** based on their clinical features 
+    (Age, TMB) and the mutational profiles of the top mutated genes.
+    """)
+    
+    # Selection of classifier
+    classifier_name = st.selectbox("Select Machine Learning Model:", ["Random Forest", "Logistic Regression"])
+    
+    # Prepare data for Machine Learning
+    # Find the top 20 mutated genes across the entire study
+    top_study_genes = mutation_df['Hugo_Symbol'].value_counts().head(20).index.tolist()
+    
+    # Build a binary mutation matrix for all samples
+    mut_matrix = mutation_df[mutation_df['Hugo_Symbol'].isin(top_study_genes)].pivot_table(
+        index='Tumor_Sample_Barcode', columns='Hugo_Symbol', aggfunc='size', fill_value=0
+    )
+    mut_matrix = (mut_matrix > 0).astype(int)
+    
+    # Merge clinical features and target with mutation matrix
+    ml_base = clinical_df[['Sample ID', 'Patient Current Age', 'TMB (nonsynonymous)', 'Target']].dropna()
+    ml_df = pd.merge(ml_base, mut_matrix, left_on='Sample ID', right_index=True, how='left').fillna(0)
+    
+    # Define features (X) and target (y)
+    feature_cols = ['Patient Current Age', 'TMB (nonsynonymous)'] + top_study_genes
+    X = ml_df[feature_cols]
+    y = ml_df['Target']
+    
+    if len(ml_df) > 50 and y.sum() > 5:
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42, stratify=y)
+        
+        # Train model
+        if classifier_name == "Random Forest":
+            model = RandomForestClassifier(n_estimators=100, random_state=42)
+        else:
+            model = LogisticRegression(max_iter=1000, random_state=42)
+            
+        model.fit(X_train, y_train)
+        
+        # Predict probability
+        y_proba = model.predict_proba(X_test)[:, 1]
+        y_pred = model.predict(X_test)
+        
+        # Calculate evaluation metrics
+        acc = accuracy_score(y_test, y_pred)
+        prec = precision_score(y_test, y_pred, zero_division=0)
+        rec = recall_score(y_test, y_pred, zero_division=0)
+        f1 = f1_score(y_test, y_pred, zero_division=0)
+        
+        # Compute ROC-AUC Curve
+        fpr, tpr, _ = roc_curve(y_test, y_proba)
+        roc_auc = auc(fpr, tpr)
+        
+        # Metrics presentation
+        ml_m1, ml_m2, ml_m3, ml_m4 = st.columns(4)
+        with ml_m1:
+            st.metric("Test Accuracy", f"{acc:.2%}")
+        with ml_m2:
+            st.metric("Precision", f"{prec:.2%}")
+        with ml_m3:
+            st.metric("Recall / Sensitivity", f"{rec:.2%}")
+        with ml_m4:
+            st.metric("ROC-AUC Score", f"{roc_auc:.3f}")
+            
+        ml_c1, ml_c2 = st.columns(2)
+        
+        with ml_c1:
+            st.subheader("📈 ROC (Receiver Operating Characteristic) Curve")
+            fig_roc, ax_roc = plt.subplots(figsize=(6, 5))
+            ax_roc.plot(fpr, tpr, color='#e74c3c', lw=2, label=f'ROC Curve (AUC = {roc_auc:.2f})')
+            ax_roc.plot([0, 1], [0, 1], color='#34495e', lw=2, linestyle='--')
+            ax_roc.set_xlim([0.0, 1.0])
+            ax_roc.set_ylim([0.0, 1.05])
+            ax_roc.set_xlabel('False Positive Rate')
+            ax_roc.set_ylabel('True Positive Rate')
+            ax_roc.set_title('Model ROC Curve')
+            ax_roc.legend(loc="lower right")
+            st.pyplot(fig_roc)
+            
+        with ml_c2:
+            st.subheader("📊 Feature Importance Plot")
+            fig_imp, ax_imp = plt.subplots(figsize=(6, 5))
+            if classifier_name == "Random Forest":
+                importances = pd.Series(model.feature_importances_, index=feature_cols).sort_values(ascending=True).tail(10)
+                importances.plot(kind='barh', color='#e74c3c', ax=ax_imp)
+                ax_imp.set_xlabel('Feature Importance')
+            else:
+                coefs = pd.Series(model.coef_[0], index=feature_cols).sort_values(ascending=True)
+                # Keep top 10 strongest features (absolute weight)
+                coefs_sorted = coefs.reindex(coefs.abs().sort_values().tail(10).index)
+                coefs_sorted.plot(kind='barh', color='#3498db', ax=ax_imp)
+                ax_imp.set_xlabel('Model Coefficient')
+            ax_imp.set_ylabel('Features')
+            st.pyplot(fig_imp)
+    else:
+        st.warning("Insufficient samples or positive metastasis classes to perform Machine Learning training.")
+        
+    st.markdown("---")
+    
+    # Option to view static pre-calculated figure
+    show_static_ml = st.checkbox("Show Static Multi-omics Feature Importance Figure (Previously Generated)")
+    if show_static_ml:
+        static_img_path = "/Users/irembernaguven/Downloads/cancer project/multiomics_feature_importance.png"
+        if os.path.exists(static_img_path):
+            st.image(static_img_path, caption="Pre-calculated Multi-omics Feature Importance Heatmap / Chart", use_container_width=True)
+        else:
+            st.error("Static image 'multiomics_feature_importance.png' was not found in the project folder.")
+
+# =========================================================
+# TAB 7: NETWORK & CO-OCCURRENCE ANALYSIS
+# =========================================================
+with tab_network:
+    st.header("🕸️ Gene Mutation Co-occurrence & Network Analysis")
+    st.markdown("""
+    Explore relationships of co-occurrence or mutual exclusivity between gene mutations. 
+    Genes that frequently mutate together indicate synergistic pathway activation, while mutually exclusive mutations point to redundant mechanisms.
+    """)
+    
+    # Calculate Jaccard / correlation for top 15 mutated genes
+    top_net_genes = mutation_df['Hugo_Symbol'].value_counts().head(15).index.tolist()
+    
+    # Binary mutation matrix
+    net_matrix = mutation_df[mutation_df['Hugo_Symbol'].isin(top_net_genes)].pivot_table(
+        index='Tumor_Sample_Barcode', columns='Hugo_Symbol', aggfunc='size', fill_value=0
+    )
+    net_matrix = (net_matrix > 0).astype(int)
+    
+    # Calculate Pearson Correlation
+    corr_matrix = net_matrix.corr()
+    
+    net_c1, net_c2 = st.columns(2)
+    
+    with net_c1:
+        st.subheader("🔥 Mutation Co-occurrence Correlation Heatmap")
+        fig_heat, ax_heat = plt.subplots(figsize=(8, 7))
+        sns.heatmap(corr_matrix, annot=False, cmap='coolwarm', vmin=-1.0, vmax=1.0, square=True, cbar=True, ax=ax_heat)
+        st.pyplot(fig_heat)
+        
+    with net_c2:
+        st.subheader("🕸️ Dynamic Interaction Network")
+        st.markdown("Specify the correlation threshold to draw edges in the network graph:")
+        
+        # Edge correlation threshold slider
+        edge_threshold = st.slider("Correlation Threshold (Absolute value):", min_value=0.01, max_value=0.30, value=0.05, step=0.01)
+        
+        # Build NetworkX graph
+        G = nx.Graph()
+        for gene in top_net_genes:
+            G.add_node(gene)
+            
+        for i in range(len(top_net_genes)):
+            for j in range(i+1, len(top_net_genes)):
+                gene_a = top_net_genes[i]
+                gene_b = top_net_genes[j]
+                val = corr_matrix.loc[gene_a, gene_b]
+                if abs(val) >= edge_threshold:
+                    G.add_edge(gene_a, gene_b, weight=val)
+                    
+        # Draw NetworkX graph
+        fig_net, ax_net = plt.subplots(figsize=(8, 8))
+        pos = nx.spring_layout(G, k=0.6, seed=42)
+        
+        edges = G.edges()
+        if len(edges) > 0:
+            weights = [G[u][v]['weight'] for u,v in edges]
+            edge_colors = ['#2ecc71' if w > 0 else '#e74c3c' for w in weights]
+            edge_widths = [abs(w) * 15 for w in weights]
+            
+            nx.draw_networkx_nodes(G, pos, node_size=1000, node_color='#34495e', ax=ax_net)
+            nx.draw_networkx_labels(G, pos, font_color='white', font_size=9, font_weight='bold', ax=ax_net)
+            nx.draw_networkx_edges(G, pos, edgelist=edges, width=edge_widths, edge_color=edge_colors, ax=ax_net)
+        else:
+            nx.draw_networkx_nodes(G, pos, node_size=1000, node_color='#34495e', ax=ax_net)
+            nx.draw_networkx_labels(G, pos, font_color='white', font_size=9, font_weight='bold', ax=ax_net)
+            st.info("No connections found at this threshold. Try lowering the threshold.")
+            
+        ax_net.axis('off')
+        st.pyplot(fig_net)
+        st.markdown("**Legend:** Green edges indicate **positive co-occurrence** (mutating together). Red edges indicate **negative correlation / mutual exclusivity**.")
+
+    st.markdown("---")
+    
+    # Option to view static pre-calculated figure
+    show_static_net = st.checkbox("Show Static Mutation Co-occurrence Heatmap Figure (Previously Generated)")
+    if show_static_net:
+        static_net_path = "/Users/irembernaguven/Downloads/cancer project/mutation_cooccurrence_heatmap.png"
+        if os.path.exists(static_net_path):
+            st.image(static_net_path, caption="Pre-calculated Mutation Co-occurrence Correlation Heatmap", use_container_width=True)
+        else:
+            st.error("Static image 'mutation_cooccurrence_heatmap.png' was not found in the project folder.")
 
 # ---------------------------------------------------------
 # FOOTER / INSIGHTS
