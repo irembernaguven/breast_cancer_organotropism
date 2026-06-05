@@ -432,9 +432,9 @@ with tab_ml:
         
         # Train model
         if classifier_name == "Random Forest":
-            model = RandomForestClassifier(n_estimators=100, random_state=42)
+            model = RandomForestClassifier(n_estimators=100, class_weight='balanced', random_state=42)
         else:
-            model = LogisticRegression(max_iter=1000, random_state=42)
+            model = LogisticRegression(max_iter=1000, class_weight='balanced', random_state=42)
             
         model.fit(X_train, y_train)
         
